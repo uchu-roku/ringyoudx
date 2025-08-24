@@ -4,7 +4,7 @@ import { auth, db, googleProvider } from './firebase'
 import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth'
 import { collection, onSnapshot, query } from 'firebase/firestore'
 
-// ===== 最小スキーマ（Firestoreドキュメント想定：collection "worklogs"）
+// ===== 最小スキーマ（Firestoreドキュメント想定：collection "reports"）
 type Row = {
   work_date?: any // "YYYY-MM-DD" or Firestore Timestamp
   worker_id?: string
@@ -44,11 +44,11 @@ export default function App(){
     return onAuthStateChanged(auth, u=> setUser(u))
   },[])
 
-  // Firestore購読（worklogs 全件を取り込み→画面側で月/作業種別フィルタ）
+  // Firestore購読（reports 全件を取り込み→画面側で月/作業種別フィルタ）
   useEffect(()=>{
     setLoading(true)
     setError(null)
-    const qy = query(collection(db, 'worklogs'))
+    const qy = query(collection(db, 'reports'))
     const unsub = onSnapshot(qy, snap=>{
       const arr: Row[] = snap.docs.map(d => d.data() as Row)
       setAllRows(arr); setLoading(false)
@@ -76,7 +76,7 @@ export default function App(){
 
         <div className="bg-white rounded-2xl shadow p-4">
           <div className="text-sm text-gray-600">
-            データソース：Firestore <code>worklogs</code>（{loading ? '読込中…' : `${allRows.length} 件`}）
+            データソース：Firestore <code>reports</code>（{loading ? '読込中…' : `${allRows.length} 件`}）
             {error && <span className="ml-2 text-red-600">※ {error}</span>}
           </div>
         </div>
@@ -88,11 +88,12 @@ export default function App(){
 }
 
 /** FirestoreのTimestampや文字列/数値の揺れを吸収して標準化 */
-function normalizeRows(input: Row[]){
+// 置き換え：normalizeRows とその下の補助関数
+function normalizeRows(input: any[]){
   return input.map(r=>{
-    const dateStr = toDateString(r.work_date)
+    const dateSource = r.work_date ?? r.created_at ?? r.createdAt
     return {
-      work_date: dateStr,
+      work_date: toDateString(dateSource),
       worker_id: r.worker_id ?? '',
       worker_name: r.worker_name ?? '',
       team: r.team ?? '',
@@ -101,7 +102,7 @@ function normalizeRows(input: Row[]){
       task_code: r.task_code ?? '',
       work_time_min: num(r.work_time_min),
       output_value: num(r.output_value),
-      output_unit: r.output_unit ?? '',
+      output_unit: normalizeUnit(r.output_unit),
       machine_id: r.machine_id ?? '',
       machine_time_min: num(r.machine_time_min),
       weather: r.weather ?? '',
@@ -112,15 +113,19 @@ function normalizeRows(input: Row[]){
     }
   })
 }
+
 function toDateString(v:any){
   if (!v) return ''
   if (typeof v === 'string') return v.slice(0,10)
-  // Firestore Timestamp
-  if (typeof v === 'object' && 'seconds' in v){
+  if (typeof v === 'object' && 'seconds' in v){ // Firestore Timestamp
     const d = new Date(v.seconds * 1000)
     return d.toISOString().slice(0,10)
   }
   try{ return new Date(v).toISOString().slice(0,10) }catch{ return '' }
+}
+function normalizeUnit(u:any){
+  const s = String(u ?? '').trim()
+  return s === 'm3' ? 'm³' : s
 }
 function num(v:any){ const n = Number(v); return isFinite(n) ? n : 0 }
 function bool(v:any){

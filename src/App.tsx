@@ -1,389 +1,136 @@
-// App.tsx
+// src/App.tsx
 import React, { useEffect, useMemo, useState } from 'react'
+import { auth, db, googleProvider } from './firebase'
+import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth'
+import { collection, onSnapshot, query } from 'firebase/firestore'
 
+// ===== 最小スキーマ（Firestoreドキュメント想定：collection "worklogs"）
 type Row = {
-  work_date: string
-  worker_id: string
-  worker_name: string
-  team: string
-  site_id: string
-  stand_id: string
-  task_code: string
-  work_time_min: number
-  output_value: number
-  output_unit: string
-  machine_id: string
-  machine_time_min: number
-  weather: string
-  ky_check: boolean
-  incident: string
-  photo_1: string
-  photo_2: string
-  photo_3: string
-  note: string
+  work_date?: any // "YYYY-MM-DD" or Firestore Timestamp
+  worker_id?: string
+  worker_name?: string
+  team?: string
+  site_id?: string
+  stand_id?: string
+  task_code?: string
+  work_time_min?: number
+  output_value?: number
+  output_unit?: string
+  machine_id?: string
+  machine_time_min?: number
+  weather?: string
+  ky_check?: boolean
+  incident?: string
+  photo_1?: string
+  photo_2?: string
+  photo_3?: string
+  note?: string
 }
 
 const TASK_OPTIONS = [
-  { v: '下刈り', unit: 'ha' },
-  { v: '間伐',  unit: '本' },
-  { v: '主伐',  unit: 'm³' },
-  { v: '造林',  unit: '本' },
-  { v: '路網整備', unit: 'm' },
-  { v: '集材',  unit: 'm³' },
-  { v: '造材',  unit: 'm³' },
-  { v: '搬出',  unit: 'm³' },
-  { v: '調査',  unit: 'ha' },
-]
-const WEATHER = ['晴','曇','雨','雪','その他']
-const INCIDENT = ['無','軽微','事故']
-
-const header = [
-  'work_date','worker_id','worker_name','team','site_id','stand_id',
-  'task_code','work_time_min','output_value','output_unit',
-  'machine_id','machine_time_min','weather','ky_check','incident',
-  'photo_1','photo_2','photo_3','note'
+  { v: '下刈り', unit: 'ha' }, { v: '間伐', unit: '本' }, { v: '主伐', unit: 'm³' },
+  { v: '造林', unit: '本' }, { v: '路網整備', unit: 'm' }, { v: '集材', unit: 'm³' },
+  { v: '造材', unit: 'm³' }, { v: '搬出', unit: 'm³' }, { v: '調査', unit: 'ha' },
 ]
 
-// ====== CSV UTIL ======
-function csvEscape(val: unknown){
-  if (val == null) return ''
-  const s = String(val)
-  return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s
-}
-function toCSV(rows: Row[]){
-  const head = header.map(csvEscape).join(',')
-  const body = rows.map(r => header.map(k => csvEscape((r as any)[k])).join(',')).join('\n')
-  return '\ufeff' + head + '\n' + body // Excel向けにBOM付与
-}
-function parseCSV(text: string): string[][] {
-  // 小さめのCSV向け：簡易ステートマシン（ダブルクォート対応）
-  const out: string[][] = []
-  let row: string[] = []
-  let field = ''
-  let inQuotes = false
-  for (let i=0; i<text.length; i++){
-    const c = text[i]
-    if (inQuotes){
-      if (c === '"'){
-        if (text[i+1] === '"'){ field += '"'; i++ } else { inQuotes = false }
-      } else {
-        field += c
-      }
-    } else {
-      if (c === '"'){ inQuotes = true }
-      else if (c === ','){ row.push(field); field = '' }
-      else if (c === '\n'){ row.push(field); out.push(row); row = []; field = '' }
-      else if (c === '\r'){ /* skip */ }
-      else { field += c }
-    }
-  }
-  if (field.length || row.length){ row.push(field); out.push(row) }
-  return out
-}
-function toBool(s: string){
-  const v = (s || '').trim().toLowerCase()
-  return v === 'true' || v === '1' || v === 'y' || v === 'yes' || v === 'on' || v === 'はい'
-}
-function toNum(s: string){ const n = Number(s); return isFinite(n) ? n : 0 }
-
-// ====== APP ======
 export default function App(){
-  const [tab, setTab] = useState<'form'|'dashboard'>('form')
-  const [rows, setRows] = useState<Row[]>([])
-  const [form, setForm] = useState<Row>({
-    work_date: new Date().toISOString().slice(0,10),
-    worker_id: '', worker_name: '', team: '',
-    site_id: '', stand_id: '',
-    task_code: '間伐', work_time_min: 0,
-    output_value: 0, output_unit: '本',
-    machine_id: '', machine_time_min: 0,
-    weather: '晴', ky_check: false, incident: '無',
-    photo_1:'', photo_2:'', photo_3:'', note:''
-  })
+  const [user, setUser] = useState<User|null>(null)
+  const [allRows, setAllRows] = useState<Row[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string| null>(null)
 
-  // ローカル保存
+  // 認証（必要なルールの場合に備えてボタンを置く。未認証でも読めるルールならそのまま動きます）
   useEffect(()=>{
-    const saved = localStorage.getItem('worklog_rows_v1')
-    if (saved){
-      try{ setRows(JSON.parse(saved)) }catch{}
-    }
+    return onAuthStateChanged(auth, u=> setUser(u))
   },[])
-  useEffect(()=>{
-    localStorage.setItem('worklog_rows_v1', JSON.stringify(rows))
-  },[rows])
 
-  function onTaskChange(task: string){
-    const t = TASK_OPTIONS.find(x => x.v === task)
-    setForm(p => ({...p, task_code: task, output_unit: t ? t.unit : p.output_unit}))
-  }
-  function addRow(){
-    if(!form.work_date || !form.worker_name || !form.task_code){
-      alert('作業日・作業員名・作業種別は必須です')
-      return
-    }
-    setRows(prev => [...prev, {...form}])
-  }
-  function clearForm(){
-    setForm(p => ({...p,
-      site_id:'', stand_id:'', output_value:0, work_time_min:0,
-      machine_id:'', machine_time_min:0, note:'',
-      photo_1:'', photo_2:'', photo_3:''
-    }))
-  }
-  function downloadCSV(){
-    const blob = new Blob([toCSV(rows)], {type:'text/csv;charset=utf-8;'})
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url; a.download = `worklog_${new Date().toISOString().slice(0,10)}.csv`
-    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url)
-  }
-  async function importCSV(file: File){
-    const text = await file.text()
-    const table = parseCSV(text)
-    if (!table.length) return
-    let cols = table[0]
-    if (cols[0]?.charCodeAt(0) === 0xFEFF){ cols[0] = cols[0].slice(1) } // BOM
-    const idx = header.map(h => cols.indexOf(h))
-    const bad = idx.some(i => i < 0)
-    if (bad) { alert('ヘッダーが一致しません。まず本アプリのCSV出力を使ってください。'); return }
-    const parsed: Row[] = table.slice(1).filter(r => r.length>1).map(r => ({
-      work_date: r[idx[0]]||'',
-      worker_id: r[idx[1]]||'',
-      worker_name: r[idx[2]]||'',
-      team: r[idx[3]]||'',
-      site_id: r[idx[4]]||'',
-      stand_id: r[idx[5]]||'',
-      task_code: r[idx[6]]||'',
-      work_time_min: toNum(r[idx[7]]),
-      output_value: toNum(r[idx[8]]),
-      output_unit: r[idx[9]]||'',
-      machine_id: r[idx[10]]||'',
-      machine_time_min: toNum(r[idx[11]]),
-      weather: r[idx[12]]||'',
-      ky_check: toBool(r[idx[13]]||''),
-      incident: r[idx[14]]||'',
-      photo_1: r[idx[15]]||'',
-      photo_2: r[idx[16]]||'',
-      photo_3: r[idx[17]]||'',
-      note: r[idx[18]]||'',
-    }))
-    setRows(parsed)
-    setTab('dashboard')
-  }
+  // Firestore購読（worklogs 全件を取り込み→画面側で月/作業種別フィルタ）
+  useEffect(()=>{
+    setLoading(true)
+    setError(null)
+    const qy = query(collection(db, 'worklogs'))
+    const unsub = onSnapshot(qy, snap=>{
+      const arr: Row[] = snap.docs.map(d => d.data() as Row)
+      setAllRows(arr); setLoading(false)
+    }, (e)=>{
+      console.error(e); setError(e.message); setLoading(false)
+    })
+    return () => unsub()
+  },[])
 
   return (
     <div className="min-h-screen bg-gray-50 p-4 md:p-8">
       <div className="max-w-6xl mx-auto space-y-6">
         <header className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-2xl md:text-3xl font-bold">林業DX – 作業日報 & 経営ダッシュボード</h1>
-          <nav className="flex gap-2">
-            <button onClick={()=>setTab('form')}
-              className={`px-3 py-1.5 rounded-xl border ${tab==='form'?'bg-black text-white':'bg-white'}`}>入力フォーム</button>
-            <button onClick={()=>setTab('dashboard')}
-              className={`px-3 py-1.5 rounded-xl border ${tab==='dashboard'?'bg-black text-white':'bg-white'}`}>ダッシュボード</button>
-          </nav>
+          <h1 className="text-2xl md:text-3xl font-bold">林業DX – 経営ダッシュボード（Firestore）</h1>
+          <div className="flex items-center gap-2">
+            {user
+              ? (<>
+                  <span className="text-sm text-gray-600">{user.displayName || user.email}</span>
+                  <button className="px-3 py-1.5 rounded-xl border bg-white" onClick={()=>signOut(auth)}>ログアウト</button>
+                </>)
+              : (<button className="px-3 py-1.5 rounded-xl border bg-white" onClick={()=>signInWithPopup(auth, googleProvider)}>Googleでログイン</button>)
+            }
+          </div>
         </header>
 
-        {tab==='form' ? (
-          <FormPane
-            rows={rows} setRows={setRows}
-            form={form} setForm={setForm}
-            onTaskChange={onTaskChange}
-            addRow={addRow} clearForm={clearForm}
-            downloadCSV={downloadCSV}
-            importCSV={importCSV}
-          />
-        ) : (
-          <DashboardPane rows={rows} importCSV={importCSV} />
-        )}
+        <div className="bg-white rounded-2xl shadow p-4">
+          <div className="text-sm text-gray-600">
+            データソース：Firestore <code>worklogs</code>（{loading ? '読込中…' : `${allRows.length} 件`}）
+            {error && <span className="ml-2 text-red-600">※ {error}</span>}
+          </div>
+        </div>
+
+        {!loading && !error && <DashboardPane rows={normalizeRows(allRows)} />}
       </div>
     </div>
   )
 }
 
-// ====== 入力フォーム ======
-function FormPane(props:{
-  rows: Row[], setRows: (fn: any)=>void
-  form: Row, setForm: (fn: any)=>void
-  onTaskChange: (task: string)=>void
-  addRow: ()=>void, clearForm: ()=>void
-  downloadCSV: ()=>void
-  importCSV: (f: File)=>Promise<void>
-}){
-  const {rows, form, setForm, onTaskChange, addRow, clearForm, downloadCSV, importCSV} = props
-  const timePresets = [120, 240, 360, 480]
-
-  return (
-    <>
-      <p className="text-gray-600">追加→「CSVダウンロード」で出力（Excel雛形の「日報_raw」に貼り付け可）。ダッシュボードは同一画面のタブで閲覧できます。</p>
-
-      <div className="bg-white rounded-2xl shadow p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-500">作業日</span>
-          <input type="date" className="border rounded-md p-2"
-            value={form.work_date} onChange={e=>setForm({...form, work_date:e.target.value})}/>
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-500">作業員ID</span>
-          <input className="border rounded-md p-2" placeholder="W0123"
-            value={form.worker_id} onChange={e=>setForm({...form, worker_id:e.target.value})}/>
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-500">作業員名</span>
-          <input className="border rounded-md p-2" placeholder="佐藤 太郎"
-            value={form.worker_name} onChange={e=>setForm({...form, worker_name:e.target.value})}/>
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-500">班</span>
-          <input className="border rounded-md p-2" placeholder="A班"
-            value={form.team} onChange={e=>setForm({...form, team:e.target.value})}/>
-        </label>
-
-        <label className="flex flex-col gap-1 md:col-span-2">
-          <span className="text-sm text-gray-500">現場ID/名称</span>
-          <input className="border rounded-md p-2" placeholder="S-24-KAMI"
-            value={form.site_id} onChange={e=>setForm({...form, site_id:e.target.value})}/>
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-500">林班/小班ID</span>
-          <input className="border rounded-md p-2" placeholder="B05-2"
-            value={form.stand_id} onChange={e=>setForm({...form, stand_id:e.target.value})}/>
-        </label>
-
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-500">作業種別</span>
-          <select className="border rounded-md p-2" value={form.task_code}
-            onChange={e=>onTaskChange(e.target.value)}>
-            {TASK_OPTIONS.map(t => <option key={t.v} value={t.v}>{t.v}</option>)}
-          </select>
-        </label>
-
-        <div className="flex items-end gap-2">
-          <label className="flex-1 flex flex-col gap-1">
-            <span className="text-sm text-gray-500">作業時間（分）</span>
-            <input type="number" className="border rounded-md p-2" min={0} step={10}
-              value={form.work_time_min}
-              onChange={e=>setForm({...form, work_time_min:Number(e.target.value)})}/>
-          </label>
-          <div className="flex gap-2">
-            {timePresets.map(m => (
-              <button key={m} className="px-2 py-1 border rounded-md text-sm"
-                onClick={()=>setForm({...form, work_time_min:m})}>{m/60}h</button>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex items-end gap-2">
-          <label className="flex-1 flex flex-col gap-1">
-            <span className="text-sm text-gray-500">成果量</span>
-            <input type="number" className="border rounded-md p-2" min={0} step={0.1}
-              value={form.output_value}
-              onChange={e=>setForm({...form, output_value:Number(e.target.value)})}/>
-          </label>
-          <label className="w-28 flex flex-col gap-1">
-            <span className="text-sm text-gray-500">単位</span>
-            <select className="border rounded-md p-2" value={form.output_unit}
-              onChange={e=>setForm({...form, output_unit:e.target.value})}>
-              <option>ha</option><option>本</option><option>m³</option><option>m</option>
-            </select>
-          </label>
-        </div>
-
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-500">使用機械ID/名称</span>
-          <input className="border rounded-md p-2" placeholder="EXC-01"
-            value={form.machine_id} onChange={e=>setForm({...form, machine_id:e.target.value})}/>
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-500">機械稼働（分）</span>
-          <input type="number" className="border rounded-md p-2" min={0} step={10}
-            value={form.machine_time_min}
-            onChange={e=>setForm({...form, machine_time_min:Number(e.target.value)})}/>
-        </label>
-
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-500">天候</span>
-          <select className="border rounded-md p-2" value={form.weather}
-            onChange={e=>setForm({...form, weather:e.target.value})}>
-            {WEATHER.map(w => <option key={w}>{w}</option>)}
-          </select>
-        </label>
-        <label className="flex items-center gap-2">
-          <input type="checkbox" checked={form.ky_check}
-            onChange={e=>setForm({...form, ky_check:e.target.checked})}/>
-          <span className="text-sm text-gray-700">KY実施</span>
-        </label>
-
-        <label className="flex flex-col gap-1">
-          <span className="text-sm text-gray-500">インシデント</span>
-          <select className="border rounded-md p-2" value={form.incident}
-            onChange={e=>setForm({...form, incident:e.target.value})}>
-            {INCIDENT.map(i => <option key={i}>{i}</option>)}
-          </select>
-        </label>
-
-        <label className="flex flex-col gap-1 md:col-span-2">
-          <span className="text-sm text-gray-500">写真（URL/ID） 最大3つ</span>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-            <input className="border rounded-md p-2" placeholder="photo_1"
-              value={form.photo_1} onChange={e=>setForm({...form, photo_1:e.target.value})}/>
-            <input className="border rounded-md p-2" placeholder="photo_2"
-              value={form.photo_2} onChange={e=>setForm({...form, photo_2:e.target.value})}/>
-            <input className="border rounded-md p-2" placeholder="photo_3"
-              value={form.photo_3} onChange={e=>setForm({...form, photo_3:e.target.value})}/>
-          </div>
-        </label>
-
-        <label className="flex flex-col gap-1 md:col-span-2">
-          <span className="text-sm text-gray-500">備考</span>
-          <textarea className="border rounded-md p-2" rows={3}
-            value={form.note} onChange={e=>setForm({...form, note:e.target.value})}/>
-        </label>
-
-        <div className="flex flex-wrap gap-2 md:col-span-2">
-          <button className="px-4 py-2 rounded-xl bg-black text-white" onClick={addRow}>追加</button>
-          <button className="px-4 py-2 rounded-xl border" onClick={clearForm}>クリア</button>
-          <button className="px-4 py-2 rounded-xl border" onClick={downloadCSV} disabled={rows.length===0}>
-            CSVダウンロード（{rows.length}件）
-          </button>
-          <label className="ml-auto flex items-center gap-2 text-sm">
-            <span className="text-gray-500">CSVインポート</span>
-            <input type="file" accept=".csv,text/csv" onChange={e=>e.target.files?.[0] && importCSV(e.target.files[0])}/>
-          </label>
-        </div>
-      </div>
-
-      <div className="bg-white rounded-2xl shadow p-4 md:p-6">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-lg font-semibold">入力済みデータ（プレビュー）</h2>
-          <span className="text-sm text-gray-500">ヘッダー：{header.join(', ')}</span>
-        </div>
-        <div className="overflow-auto">
-          <table className="min-w-full text-sm">
-            <thead>
-              <tr className="bg-gray-100">
-                {header.map(h => <th key={h} className="text-left p-2 whitespace-nowrap">{h}</th>)}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length===0
-                ? <tr><td className="p-2 text-gray-500" colSpan={header.length}>まだデータがありません。上のフォームから追加してください。</td></tr>
-                : rows.map((r, idx) => (
-                    <tr key={idx} className="border-t">
-                      {header.map(h => <td key={h} className="p-2 whitespace-nowrap">{String((r as any)[h] ?? '')}</td>)}
-                    </tr>
-                  ))
-              }
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </>
-  )
+/** FirestoreのTimestampや文字列/数値の揺れを吸収して標準化 */
+function normalizeRows(input: Row[]){
+  return input.map(r=>{
+    const dateStr = toDateString(r.work_date)
+    return {
+      work_date: dateStr,
+      worker_id: r.worker_id ?? '',
+      worker_name: r.worker_name ?? '',
+      team: r.team ?? '',
+      site_id: r.site_id ?? '',
+      stand_id: r.stand_id ?? '',
+      task_code: r.task_code ?? '',
+      work_time_min: num(r.work_time_min),
+      output_value: num(r.output_value),
+      output_unit: r.output_unit ?? '',
+      machine_id: r.machine_id ?? '',
+      machine_time_min: num(r.machine_time_min),
+      weather: r.weather ?? '',
+      ky_check: bool(r.ky_check),
+      incident: r.incident ?? '無',
+      photo_1: r.photo_1 ?? '', photo_2: r.photo_2 ?? '', photo_3: r.photo_3 ?? '',
+      note: r.note ?? '',
+    }
+  })
+}
+function toDateString(v:any){
+  if (!v) return ''
+  if (typeof v === 'string') return v.slice(0,10)
+  // Firestore Timestamp
+  if (typeof v === 'object' && 'seconds' in v){
+    const d = new Date(v.seconds * 1000)
+    return d.toISOString().slice(0,10)
+  }
+  try{ return new Date(v).toISOString().slice(0,10) }catch{ return '' }
+}
+function num(v:any){ const n = Number(v); return isFinite(n) ? n : 0 }
+function bool(v:any){
+  if (typeof v === 'boolean') return v
+  const s = String(v ?? '').toLowerCase()
+  return ['true','1','yes','y','on','はい'].includes(s)
 }
 
-// ====== KPI集計 & ダッシュボード ======
-function DashboardPane({rows, importCSV}:{rows: Row[], importCSV:(f:File)=>Promise<void>}){
+// ====== ダッシュボード本体（フィルタ + KPI + 簡易チャート + 現場別テーブル） ======
+function DashboardPane({rows}:{rows: ReturnType<typeof normalizeRows>}){
   const monthStr = new Date().toISOString().slice(0,7)
   const [task, setTask] = useState<string>('すべて')
   const [month, setMonth] = useState<string>(monthStr)
@@ -415,17 +162,13 @@ function DashboardPane({rows, importCSV}:{rows: Row[], importCSV:(f:File)=>Promi
             {TASK_OPTIONS.map(t=> <option key={t.v} value={t.v}>{t.v}</option>)}
           </select>
         </div>
-        <label className="ml-auto bg-white border rounded-xl px-3 py-2 text-sm flex items-center gap-2">
-          <span className="text-gray-500">CSVインポート</span>
-          <input type="file" accept=".csv,text/csv" onChange={e=>e.target.files?.[0] && importCSV(e.target.files[0])}/>
-        </label>
       </div>
 
       {/* KPI Cards */}
       <div className="grid md:grid-cols-3 gap-4">
         <KpiCard title="総成果量" value={kpi.totalOutputLabel}/>
-        <KpiCard title="労働時間（人時）" value={fmtNum(kpi.workerHours,1)}/>
-        <KpiCard title="機械稼働（時間）" value={fmtNum(kpi.machineHours,1)}/>
+        <KpiCard title="労働時間（人時）" value={fmt(kpi.workerHours,1)}/>
+        <KpiCard title="機械稼働（時間）" value={fmt(kpi.machineHours,1)}/>
         <KpiCard title="生産性（成果／人時）" value={kpi.productivityLabel}/>
         <KpiCard title="機械稼働率（機械h/人h）" value={kpi.workerHours>0? (kpi.machineHours/kpi.workerHours).toFixed(2):'-'}/>
         <KpiCard title="KY実施率" value={(kpi.kyRate*100).toFixed(0)+'%'} sub={kpi.kyCount+' / '+kpi.count+'件'}/>
@@ -437,13 +180,8 @@ function DashboardPane({rows, importCSV}:{rows: Row[], importCSV:(f:File)=>Promi
       {/* 簡易チャート */}
       <div className="grid md:grid-cols-2 gap-4">
         <ChartCard title={kpi.singleUnit ? `日別成果量（${kpi.singleUnit}）` : '日別作業時間（人時）'}
-                   data={kpi.dailySeries}
-                   maxHeight={120}
-        />
-        <ChartCard title="現場別 生産性"
-                   data={kpi.bySiteSeries}
-                   maxHeight={120}
-        />
+                   data={kpi.dailySeries} maxHeight={120}/>
+        <ChartCard title="現場別 生産性" data={kpi.bySiteSeries} maxHeight={120}/>
       </div>
 
       {/* 現場別テーブル */}
@@ -472,8 +210,8 @@ function DashboardPane({rows, importCSV}:{rows: Row[], importCSV:(f:File)=>Promi
                 <tr key={s.key} className="border-t">
                   <td className="p-2">{s.key || '-'}</td>
                   <td className="p-2 text-right">{s.days}</td>
-                  <td className="p-2 text-right">{fmtNum(s.workerHours,1)}</td>
-                  <td className="p-2 text-right">{fmtNum(s.machineHours,1)}</td>
+                  <td className="p-2 text-right">{fmt(s.workerHours,1)}</td>
+                  <td className="p-2 text-right">{fmt(s.machineHours,1)}</td>
                   <td className="p-2 text-right">{s.outputLabel}</td>
                   <td className="p-2 text-right">{s.productivityLabel}</td>
                   <td className="p-2 text-right">{(s.kyRate*100).toFixed(0)}%</td>
@@ -492,8 +230,8 @@ function DashboardPane({rows, importCSV}:{rows: Row[], importCSV:(f:File)=>Promi
   )
 }
 
-function fmtNum(n:number, d=0){ return isFinite(n) ? n.toFixed(d) : '-' }
-
+// ====== ビュー用小物 ======
+function fmt(n:number, d=0){ return isFinite(n) ? n.toFixed(d) : '-' }
 function KpiCard({title, value, sub}:{title:string, value:string, sub?:string}){
   return (
     <div className="bg-white rounded-2xl shadow p-4">
@@ -503,9 +241,7 @@ function KpiCard({title, value, sub}:{title:string, value:string, sub?:string}){
     </div>
   )
 }
-
 function ChartCard({title, data, maxHeight}:{title:string, data:{label:string, value:number}[], maxHeight:number}){
-  // 超簡易SVGバー（依存なし）
   const max = Math.max(1, ...data.map(d=>d.value))
   const barW = 20, gap = 8
   const width = data.length * (barW + gap) + gap
@@ -533,8 +269,8 @@ function ChartCard({title, data, maxHeight}:{title:string, data:{label:string, v
 }
 function short(s:string){ return s.length>6 ? s.slice(5) : s }
 
-// ====== 集計ロジック ======
-function computeKPI(rows: Row[]){
+// ====== 集計ロジック（CSV版をそのまま流用） ======
+function computeKPI(rows: ReturnType<typeof normalizeRows>){
   const count = rows.length
   const workerHours = rows.reduce((a,r)=>a + (r.work_time_min||0)/60, 0)
   const machineHours = rows.reduce((a,r)=>a + (r.machine_time_min||0)/60, 0)
@@ -543,7 +279,6 @@ function computeKPI(rows: Row[]){
   const incidentSevere = rows.reduce((a,r)=>a + (r.incident==='事故'?1:0), 0)
   const kyRate = count>0 ? kyCount / count : 0
 
-  // 単位別の成果量
   const outByUnit = new Map<string, number>()
   for(const r of rows){
     const u = (r.output_unit||'').trim()
@@ -559,7 +294,6 @@ function computeKPI(rows: Row[]){
   const productivity = singleUnit && workerHours>0 ? (outByUnit.get(singleUnit)||0)/workerHours : NaN
   const productivityLabel = singleUnit && isFinite(productivity) ? `${productivity.toFixed(2)} ${singleUnit}/人時` : '-'
 
-  // 日別
   const byDay = new Map<string, {out:number, hours:number}>()
   for(const r of rows){
     const key = r.work_date || ''
@@ -573,7 +307,6 @@ function computeKPI(rows: Row[]){
     .sort((a,b)=>a[0].localeCompare(b[0]))
     .map(([d,v])=> ({label:d, value: singleUnit ? v.out : v.hours}))
 
-  // 現場別
   type SiteAgg = {
     key: string
     days: number
@@ -625,14 +358,12 @@ function computeKPI(rows: Row[]){
     }
   })
 
-  // 現場別シリーズ（生産性）
   const bySiteSeries = bySite.map(s=>{
     const m = s.productivityLabel.match(/^([\d.]+)/)
     const v = m ? Number(m[1]) : 0
     return {label: s.key, value: v}
   })
 
-  // 人・班・現場
   const workerSet = new Set(rows.map(r=>r.worker_id || r.worker_name).filter(Boolean))
   const teamSet = new Set(rows.map(r=>r.team).filter(Boolean))
   const siteSet = new Set(rows.map(r=>r.site_id).filter(Boolean))
@@ -651,3 +382,4 @@ function computeKPI(rows: Row[]){
     siteCount: siteSet.size,
   }
 }
+function fmtNum(n:number, d=0){ return isFinite(n) ? n.toFixed(d) : '-' }

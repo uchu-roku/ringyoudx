@@ -1,21 +1,28 @@
-// src/firebase.ts（最小・そのまま使えます）
+// src/firebase.ts
 import { initializeApp } from 'firebase/app'
 import { getAuth, GoogleAuthProvider } from 'firebase/auth'
 import { getFirestore, enableIndexedDbPersistence } from 'firebase/firestore'
 
 const firebaseConfig = {
-  apiKey: "AIzaSyBFCXGOsvnc4-TN88J5ioV8H3MC0kvMiXg",
-  authDomain: "ringyoudx.firebaseapp.com",
-  projectId: "ringyoudx",
-  storageBucket: "ringyoudx.firebasestorage.app",
-  messagingSenderId: "529402072238",
-  appId: "1:529402072238:web:c47cb5e83dd39175a5b13f"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY as string,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN as string,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID as string,
+  // 例: "ringyoudx.appspot.com"（← firebasestorage.app ではなく appspot.com）
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET as string,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID as string,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID as string,
 }
 
-export const app = initializeApp(firebaseConfig)
+const app = initializeApp(firebaseConfig)
+
 export const auth = getAuth(app)
 export const googleProvider = new GoogleAuthProvider()
 export const db = getFirestore(app)
 
-// 圏外対応（IndexedDBに永続化）
-enableIndexedDbPersistence(db).catch(() => {})
+// オフライン永続化（複数タブや非対応ブラウザは握りつぶす）
+if (typeof window !== 'undefined') {
+  enableIndexedDbPersistence(db).catch((e: any) => {
+    // e.code === 'failed-precondition'（複数タブ）や 'unimplemented'（未対応）など
+    console.warn('Persistence not enabled:', e?.code || e)
+  })
+}

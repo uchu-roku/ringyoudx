@@ -2,93 +2,28 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { auth, db, googleProvider } from './firebase'
 import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth'
-import { collection, onSnapshot, query } from 'firebase/firestore'
+import {
+  addDoc, collection, onSnapshot, query, serverTimestamp
+} from 'firebase/firestore'
 
-// ===== 最小スキーマ（Firestoreドキュメント想定：collection "reports"）
-type Row = {
-  work_date?: any // "YYYY-MM-DD" or Firestore Timestamp
-  worker_id?: string
-  worker_name?: string
-  team?: string
-  site_id?: string
-  stand_id?: string
-  task_code?: string
-  work_time_min?: number
-  output_value?: number
-  output_unit?: string
-  machine_id?: string
-  machine_time_min?: number
-  weather?: string
-  ky_check?: boolean
-  incident?: string
-  photo_1?: string
-  photo_2?: string
-  photo_3?: string
-  note?: string
-}
-
+// ===== 作業種別と推奨単位（選ぶと単位が自動セットされます） =====
 const TASK_OPTIONS = [
-  { v: '下刈り', unit: 'ha' }, { v: '間伐', unit: '本' }, { v: '主伐', unit: 'm³' },
-  { v: '造林', unit: '本' }, { v: '路網整備', unit: 'm' }, { v: '集材', unit: 'm³' },
-  { v: '造材', unit: 'm³' }, { v: '搬出', unit: 'm³' }, { v: '調査', unit: 'ha' },
+  { v: '下刈り', unit: 'ha' },
+  { v: '間伐',  unit: '本' },
+  { v: '主伐',  unit: 'm³' },
+  { v: '造林',  unit: '本' },
+  { v: '路網整備', unit: 'm' },
+  { v: '集材',  unit: 'm³' },
+  { v: '造材',  unit: 'm³' },
+  { v: '搬出',  unit: 'm³' },
+  { v: '調査',  unit: 'ha' },
 ]
+const WEATHER = ['晴','曇','雨','雪','その他']
+const INCIDENT = ['無','軽微','事故']
 
-export default function App(){
-  const [user, setUser] = useState<User|null>(null)
-  const [allRows, setAllRows] = useState<Row[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string| null>(null)
+type Tab = 'dashboard' | 'form'
 
-  // 認証（必要なルールの場合に備えてボタンを置く。未認証でも読めるルールならそのまま動きます）
-  useEffect(()=>{
-    return onAuthStateChanged(auth, u=> setUser(u))
-  },[])
-
-  // Firestore購読（reports 全件を取り込み→画面側で月/作業種別フィルタ）
-  useEffect(()=>{
-    setLoading(true)
-    setError(null)
-    const qy = query(collection(db, 'reports'))
-    const unsub = onSnapshot(qy, snap=>{
-      const arr: Row[] = snap.docs.map(d => d.data() as Row)
-      setAllRows(arr); setLoading(false)
-    }, (e)=>{
-      console.error(e); setError(e.message); setLoading(false)
-    })
-    return () => unsub()
-  },[])
-
-  return (
-    <div className="min-h-screen bg-gray-50 p-4 md:p-8">
-      <div className="max-w-6xl mx-auto space-y-6">
-        <header className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-2xl md:text-3xl font-bold">林業DX – 経営ダッシュボード（Firestore）</h1>
-          <div className="flex items-center gap-2">
-            {user
-              ? (<>
-                  <span className="text-sm text-gray-600">{user.displayName || user.email}</span>
-                  <button className="px-3 py-1.5 rounded-xl border bg-white" onClick={()=>signOut(auth)}>ログアウト</button>
-                </>)
-              : (<button className="px-3 py-1.5 rounded-xl border bg-white" onClick={()=>signInWithPopup(auth, googleProvider)}>Googleでログイン</button>)
-            }
-          </div>
-        </header>
-
-        <div className="bg-white rounded-2xl shadow p-4">
-          <div className="text-sm text-gray-600">
-            データソース：Firestore <code>reports</code>（{loading ? '読込中…' : `${allRows.length} 件`}）
-            {error && <span className="ml-2 text-red-600">※ {error}</span>}
-          </div>
-        </div>
-
-        {!loading && !error && <DashboardPane rows={normalizeRows(allRows)} />}
-      </div>
-    </div>
-  )
-}
-
-/** FirestoreのTimestampや文字列/数値の揺れを吸収して標準化 */
-// 置き換え：normalizeRows とその下の補助関数
+// Firestoreのドキュメントを標準形に整える
 function normalizeRows(input: any[]){
   return input.map(r=>{
     const dateSource = r.work_date ?? r.created_at ?? r.createdAt
@@ -113,28 +48,326 @@ function normalizeRows(input: any[]){
     }
   })
 }
-
 function toDateString(v:any){
   if (!v) return ''
   if (typeof v === 'string') return v.slice(0,10)
-  if (typeof v === 'object' && 'seconds' in v){ // Firestore Timestamp
+  if (typeof v === 'object' && 'seconds' in v){
     const d = new Date(v.seconds * 1000)
     return d.toISOString().slice(0,10)
   }
   try{ return new Date(v).toISOString().slice(0,10) }catch{ return '' }
 }
-function normalizeUnit(u:any){
-  const s = String(u ?? '').trim()
-  return s === 'm3' ? 'm³' : s
-}
+function normalizeUnit(u:any){ const s=String(u??'').trim(); return s==='m3' ? 'm³' : s }
 function num(v:any){ const n = Number(v); return isFinite(n) ? n : 0 }
-function bool(v:any){
-  if (typeof v === 'boolean') return v
-  const s = String(v ?? '').toLowerCase()
-  return ['true','1','yes','y','on','はい'].includes(s)
+function bool(v:any){ if(typeof v==='boolean') return v; const s=String(v??'').toLowerCase(); return ['true','1','yes','y','on','はい'].includes(s) }
+function fmt(n:number, d=0){ return isFinite(n) ? n.toFixed(d) : '-' }
+function short(s:string){ return s.length>6 ? s.slice(5) : s }
+function fmtNum(n:number, d=0){ return isFinite(n) ? n.toFixed(d) : '-' }
+
+// KPI集計（前回と同じロジック）
+function computeKPI(rows: ReturnType<typeof normalizeRows>){
+  const count = rows.length
+  const workerHours = rows.reduce((a,r)=>a + (r.work_time_min||0)/60, 0)
+  const machineHours = rows.reduce((a,r)=>a + (r.machine_time_min||0)/60, 0)
+  const kyCount = rows.reduce((a,r)=>a + (r.ky_check?1:0), 0)
+  const incidentLight = rows.reduce((a,r)=>a + (r.incident==='軽微'?1:0), 0)
+  const incidentSevere = rows.reduce((a,r)=>a + (r.incident==='事故'?1:0), 0)
+  const kyRate = count>0 ? kyCount / count : 0
+
+  const outByUnit = new Map<string, number>()
+  for(const r of rows){
+    const u = (r.output_unit||'').trim()
+    if(!u) continue
+    outByUnit.set(u, (outByUnit.get(u)||0) + (r.output_value||0))
+  }
+  const units = [...outByUnit.keys()]
+  const singleUnit = units.length===1 ? units[0] : null
+  const totalOutputLabel = units.length===0 ? '-' :
+    (units.length===1 ? `${fmtNum(outByUnit.get(units[0])||0,1)} ${units[0]}`
+                      : units.map(u=>`${fmtNum(outByUnit.get(u)||0,1)} ${u}`).join(' / '))
+  const productivity = singleUnit && workerHours>0 ? (outByUnit.get(singleUnit)||0)/workerHours : NaN
+  const productivityLabel = singleUnit && isFinite(productivity) ? `${productivity.toFixed(2)} ${singleUnit}/人時` : '-'
+
+  const byDay = new Map<string, {out:number, hours:number}>()
+  for(const r of rows){
+    const key = r.work_date || ''
+    if(!key) continue
+    const cur = byDay.get(key) || {out:0, hours:0}
+    if(singleUnit){ cur.out += (r.output_unit===singleUnit ? (r.output_value||0) : 0) }
+    cur.hours += (r.work_time_min||0)/60
+    byDay.set(key, cur)
+  }
+  const dailySeries = [...byDay.entries()]
+    .sort((a,b)=>a[0].localeCompare(b[0]))
+    .map(([d,v])=> ({label:d, value: singleUnit ? v.out : v.hours}))
+
+  type SiteAgg = {
+    key: string; days: number; workerHours: number; machineHours: number;
+    outByUnit: Map<string,number>; kyRate: number; incidentLight: number; incidentSevere: number; count: number
+  }
+  const bySiteMap = new Map<string, SiteAgg>()
+  const daySetBySite = new Map<string, Set<string>>()
+  for(const r of rows){
+    const key = r.site_id || '(未設定)'
+    const s = bySiteMap.get(key) || {
+      key, days:0, workerHours:0, machineHours:0, outByUnit:new Map(), kyRate:0, incidentLight:0, incidentSevere:0, count:0
+    }
+    s.workerHours += (r.work_time_min||0)/60
+    s.machineHours += (r.machine_time_min||0)/60
+    s.count += 1
+    if (r.ky_check) s.kyRate += 1
+    if (r.incident==='軽微') s.incidentLight += 1
+    if (r.incident==='事故') s.incidentSevere += 1
+    const u = (r.output_unit||'').trim()
+    if(u) s.outByUnit.set(u, (s.outByUnit.get(u)||0) + (r.output_value||0))
+    bySiteMap.set(key, s)
+    const ds = daySetBySite.get(key) || new Set<string>()
+    if (r.work_date) ds.add(r.work_date)
+    daySetBySite.set(key, ds)
+  }
+  const bySite = [...bySiteMap.values()].map(s=>{
+    const units2 = [...s.outByUnit.keys()]
+    const outLabel = units2.length===0 ? '-' :
+      (units2.length===1 ? `${fmtNum(s.outByUnit.get(units2[0])||0,1)} ${units2[0]}`
+                         : units2.map(u=>`${fmtNum(s.outByUnit.get(u)||0,1)} ${u}`).join(' / '))
+    const prod = (singleUnit && s.workerHours>0) ? ( (s.outByUnit.get(singleUnit)||0) / s.workerHours ) : NaN
+    return {
+      key: s.key,
+      days: (daySetBySite.get(s.key)?.size)||0,
+      workerHours: s.workerHours,
+      machineHours: s.machineHours,
+      outputLabel: outLabel,
+      productivityLabel: (singleUnit && isFinite(prod)) ? `${prod.toFixed(2)} ${singleUnit}/人時` : '-',
+      kyRate: s.count>0 ? s.kyRate/s.count : 0,
+      incidentLight: s.incidentLight,
+      incidentSevere: s.incidentSevere
+    }
+  })
+  const bySiteSeries = bySite.map(s=>{
+    const m = s.productivityLabel.match(/^([\d.]+)/)
+    const v = m ? Number(m[1]) : 0
+    return {label: s.key, value: v}
+  })
+  const workerSet = new Set(rows.map(r=>r.worker_id || r.worker_name).filter(Boolean))
+  const teamSet = new Set(rows.map(r=>r.team).filter(Boolean))
+  const siteSet = new Set(rows.map(r=>r.site_id).filter(Boolean))
+
+  return {
+    count, workerHours, machineHours, kyCount, kyRate,
+    incidentLight, incidentSevere,
+    totalOutputLabel, productivityLabel, singleUnit,
+    dailySeries, bySite, bySiteSeries,
+    workerCount: workerSet.size, teamCount: teamSet.size, siteCount: siteSet.size,
+  }
 }
 
-// ====== ダッシュボード本体（フィルタ + KPI + 簡易チャート + 現場別テーブル） ======
+export default function App(){
+  const [user, setUser] = useState<User|null>(null)
+  const [allRows, setAllRows] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string| null>(null)
+  const [tab, setTab] = useState<Tab>('dashboard')
+
+  // 認証状態
+  useEffect(()=> onAuthStateChanged(auth, u=> setUser(u)),[])
+
+  // Firestore購読（コレクション：reports）
+  useEffect(()=>{
+    setLoading(true); setError(null)
+    const qy = query(collection(db, 'reports'))
+    const unsub = onSnapshot(qy, snap=>{
+      setAllRows(snap.docs.map(d => d.data()))
+      setLoading(false)
+    }, e=>{ console.error(e); setError(e.message); setLoading(false) })
+    return () => unsub()
+  },[])
+
+  return (
+    <div className="min-h-screen bg-gray-50 p-4 md:p-8">
+      <div className="max-w-6xl mx-auto space-y-6">
+        <header className="flex flex-wrap items-center justify-between gap-3">
+          <h1 className="text-2xl md:text-3xl font-bold">林業DX – 経営ダッシュボード（Firestore）</h1>
+          <div className="flex items-center gap-2">
+            <button onClick={()=>setTab('dashboard')}
+              className={`px-3 py-1.5 rounded-xl border ${tab==='dashboard'?'bg-black text-white':'bg-white'}`}>ダッシュボード</button>
+            <button onClick={()=>setTab('form')}
+              className={`px-3 py-1.5 rounded-xl border ${tab==='form'?'bg-black text-white':'bg-white'}`}>入力フォーム</button>
+            {user
+              ? (<>
+                  <span className="text-sm text-gray-600">{user.displayName || user.email}</span>
+                  <button className="px-3 py-1.5 rounded-xl border bg-white" onClick={()=>signOut(auth)}>ログアウト</button>
+                </>)
+              : (<button className="px-3 py-1.5 rounded-xl border bg-white" onClick={()=>signInWithPopup(auth, googleProvider)}>Googleでログイン</button>)
+            }
+          </div>
+        </header>
+
+        <div className="bg-white rounded-2xl shadow p-4">
+          <div className="text-sm text-gray-600">
+            データソース：Firestore <code>reports</code>（{loading ? '読込中…' : `${allRows.length} 件`}）
+            {error && <span className="ml-2 text-red-600">※ {error}</span>}
+          </div>
+        </div>
+
+        {!loading && !error && (
+          tab==='dashboard'
+            ? <DashboardPane rows={normalizeRows(allRows)} />
+            : <FormPane onSaved={()=>setTab('dashboard')} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ===== 入力フォーム（Firestoreに直接追加） =====
+function FormPane({onSaved}:{onSaved:()=>void}){
+  const today = new Date().toISOString().slice(0,10)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<string>('')
+
+  const [form, setForm] = useState({
+    work_date: today,
+    worker_id: '', worker_name: '', team: '',
+    site_id: '', stand_id: '',
+    task_code: '間伐',
+    work_time_min: 0,
+    output_value: 0,
+    output_unit: '本',
+    machine_id: '', machine_time_min: 0,
+    weather: '晴', ky_check: true, incident: '無',
+    photo_1:'', photo_2:'', photo_3:'', note:''
+  })
+
+  // 作業種別→単位 自動反映
+  function onTaskChange(task: string){
+    const t = TASK_OPTIONS.find(x => x.v === task)
+    setForm(p => ({...p, task_code: task, output_unit: t ? t.unit : p.output_unit}))
+  }
+
+  async function save(){
+    if (!form.work_date || !form.site_id || !form.task_code){
+      setMsg('作業日・現場・作業種別は必須です'); return
+    }
+    setSaving(true); setMsg('')
+    try{
+      // Firestore: reports に追加（work_date は文字列、created_at はサーバ時刻）
+      const payload = {
+        ...form,
+        work_time_min: Number(form.work_time_min)||0,
+        output_value: Number(form.output_value)||0,
+        machine_time_min: Number(form.machine_time_min)||0,
+        output_unit: normalizeUnit(form.output_unit),
+        created_at: serverTimestamp(),
+      }
+      await addDoc(collection(db, 'reports'), payload)
+      setMsg('保存しました。ダッシュボードへ切り替えます。')
+      onSaved()
+    }catch(e:any){
+      console.error(e)
+      setMsg('保存に失敗しました：' + (e?.message || e))
+    }finally{
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-2xl shadow p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+      <p className="md:col-span-2 text-gray-600 text-sm">
+        入力すると Firestore <code>reports</code> に登録され、ダッシュボードへリアルタイム反映されます。
+      </p>
+
+      <label className="flex flex-col gap-1">
+        <span className="text-sm text-gray-500">作業日</span>
+        <input type="date" className="border rounded-md p-2"
+          value={form.work_date} onChange={e=>setForm({...form, work_date:e.target.value})}/>
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-sm text-gray-500">現場ID/名称</span>
+        <input className="border rounded-md p-2" placeholder="SITE-001"
+          value={form.site_id} onChange={e=>setForm({...form, site_id:e.target.value})}/>
+      </label>
+
+      <label className="flex flex-col gap-1">
+        <span className="text-sm text-gray-500">林班/小班ID（任意）</span>
+        <input className="border rounded-md p-2" placeholder="B05-2"
+          value={form.stand_id} onChange={e=>setForm({...form, stand_id:e.target.value})}/>
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-sm text-gray-500">作業種別</span>
+        <select className="border rounded-md p-2" value={form.task_code} onChange={e=>onTaskChange(e.target.value)}>
+          {TASK_OPTIONS.map(t => <option key={t.v} value={t.v}>{t.v}</option>)}
+        </select>
+      </label>
+
+      <div className="flex items-end gap-2">
+        <label className="flex-1 flex flex-col gap-1">
+          <span className="text-sm text-gray-500">作業時間（分）</span>
+          <input type="number" className="border rounded-md p-2" min={0} step={10}
+            value={form.work_time_min} onChange={e=>setForm({...form, work_time_min:Number(e.target.value)})}/>
+        </label>
+        <label className="flex-1 flex flex-col gap-1">
+          <span className="text-sm text-gray-500">成果量</span>
+          <input type="number" className="border rounded-md p-2" min={0} step={0.1}
+            value={form.output_value} onChange={e=>setForm({...form, output_value:Number(e.target.value)})}/>
+        </label>
+        <label className="w-28 flex flex-col gap-1">
+          <span className="text-sm text-gray-500">単位</span>
+          <select className="border rounded-md p-2" value={form.output_unit}
+            onChange={e=>setForm({...form, output_unit:e.target.value})}>
+            <option>ha</option><option>本</option><option>m³</option><option>m</option>
+          </select>
+        </label>
+      </div>
+
+      <label className="flex flex-col gap-1">
+        <span className="text-sm text-gray-500">使用機械ID/名称（任意）</span>
+        <input className="border rounded-md p-2" placeholder="HL-04"
+          value={form.machine_id} onChange={e=>setForm({...form, machine_id:e.target.value})}/>
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-sm text-gray-500">機械稼働（分）（任意）</span>
+        <input type="number" className="border rounded-md p-2" min={0} step={10}
+          value={form.machine_time_min} onChange={e=>setForm({...form, machine_time_min:Number(e.target.value)})}/>
+      </label>
+
+      <label className="flex flex-col gap-1">
+        <span className="text-sm text-gray-500">天候</span>
+        <select className="border rounded-md p-2" value={form.weather}
+          onChange={e=>setForm({...form, weather:e.target.value})}>
+          {WEATHER.map(w => <option key={w}>{w}</option>)}
+        </select>
+      </label>
+      <label className="flex items-center gap-2">
+        <input type="checkbox" checked={form.ky_check}
+          onChange={e=>setForm({...form, ky_check:e.target.checked})}/>
+        <span className="text-sm text-gray-700">KY実施</span>
+      </label>
+
+      <label className="flex flex-col gap-1">
+        <span className="text-sm text-gray-500">インシデント</span>
+        <select className="border rounded-md p-2" value={form.incident}
+          onChange={e=>setForm({...form, incident:e.target.value})}>
+          {INCIDENT.map(i => <option key={i}>{i}</option>)}
+        </select>
+      </label>
+
+      <label className="flex flex-col gap-1 md:col-span-2">
+        <span className="text-sm text-gray-500">備考（任意）</span>
+        <textarea className="border rounded-md p-2" rows={3}
+          value={form.note} onChange={e=>setForm({...form, note:e.target.value})}/>
+      </label>
+
+      <div className="md:col-span-2 flex items-center gap-3">
+        <button disabled={saving}
+          className={`px-4 py-2 rounded-xl ${saving?'bg-gray-300':'bg-black text-white'}`}
+          onClick={save}>{saving ? '保存中…' : '保存してダッシュボードへ'}</button>
+        {msg && <span className="text-sm text-gray-600">{msg}</span>}
+      </div>
+    </div>
+  )
+}
+
+// ===== ダッシュボード（そのまま） =====
 function DashboardPane({rows}:{rows: ReturnType<typeof normalizeRows>}){
   const monthStr = new Date().toISOString().slice(0,7)
   const [task, setTask] = useState<string>('すべて')
@@ -235,8 +468,6 @@ function DashboardPane({rows}:{rows: ReturnType<typeof normalizeRows>}){
   )
 }
 
-// ====== ビュー用小物 ======
-function fmt(n:number, d=0){ return isFinite(n) ? n.toFixed(d) : '-' }
 function KpiCard({title, value, sub}:{title:string, value:string, sub?:string}){
   return (
     <div className="bg-white rounded-2xl shadow p-4">
@@ -246,6 +477,7 @@ function KpiCard({title, value, sub}:{title:string, value:string, sub?:string}){
     </div>
   )
 }
+
 function ChartCard({title, data, maxHeight}:{title:string, data:{label:string, value:number}[], maxHeight:number}){
   const max = Math.max(1, ...data.map(d=>d.value))
   const barW = 20, gap = 8
@@ -272,119 +504,3 @@ function ChartCard({title, data, maxHeight}:{title:string, data:{label:string, v
     </div>
   )
 }
-function short(s:string){ return s.length>6 ? s.slice(5) : s }
-
-// ====== 集計ロジック（CSV版をそのまま流用） ======
-function computeKPI(rows: ReturnType<typeof normalizeRows>){
-  const count = rows.length
-  const workerHours = rows.reduce((a,r)=>a + (r.work_time_min||0)/60, 0)
-  const machineHours = rows.reduce((a,r)=>a + (r.machine_time_min||0)/60, 0)
-  const kyCount = rows.reduce((a,r)=>a + (r.ky_check?1:0), 0)
-  const incidentLight = rows.reduce((a,r)=>a + (r.incident==='軽微'?1:0), 0)
-  const incidentSevere = rows.reduce((a,r)=>a + (r.incident==='事故'?1:0), 0)
-  const kyRate = count>0 ? kyCount / count : 0
-
-  const outByUnit = new Map<string, number>()
-  for(const r of rows){
-    const u = (r.output_unit||'').trim()
-    if(!u) continue
-    outByUnit.set(u, (outByUnit.get(u)||0) + (r.output_value||0))
-  }
-  const units = [...outByUnit.keys()]
-  const singleUnit = units.length===1 ? units[0] : null
-  const totalOutputLabel = units.length===0 ? '-' :
-    (units.length===1 ? `${fmtNum(outByUnit.get(units[0])||0,1)} ${units[0]}`
-                      : units.map(u=>`${fmtNum(outByUnit.get(u)||0,1)} ${u}`).join(' / '))
-
-  const productivity = singleUnit && workerHours>0 ? (outByUnit.get(singleUnit)||0)/workerHours : NaN
-  const productivityLabel = singleUnit && isFinite(productivity) ? `${productivity.toFixed(2)} ${singleUnit}/人時` : '-'
-
-  const byDay = new Map<string, {out:number, hours:number}>()
-  for(const r of rows){
-    const key = r.work_date || ''
-    if(!key) continue
-    const cur = byDay.get(key) || {out:0, hours:0}
-    if(singleUnit){ cur.out += (r.output_unit===singleUnit ? (r.output_value||0) : 0) }
-    cur.hours += (r.work_time_min||0)/60
-    byDay.set(key, cur)
-  }
-  const dailySeries = [...byDay.entries()]
-    .sort((a,b)=>a[0].localeCompare(b[0]))
-    .map(([d,v])=> ({label:d, value: singleUnit ? v.out : v.hours}))
-
-  type SiteAgg = {
-    key: string
-    days: number
-    workerHours: number
-    machineHours: number
-    outByUnit: Map<string,number>
-    kyRate: number
-    incidentLight: number
-    incidentSevere: number
-    count: number
-  }
-  const bySiteMap = new Map<string, SiteAgg>()
-  const daySetBySite = new Map<string, Set<string>>()
-  for(const r of rows){
-    const key = r.site_id || '(未設定)'
-    const s = bySiteMap.get(key) || {
-      key, days:0, workerHours:0, machineHours:0,
-      outByUnit:new Map(), kyRate:0, incidentLight:0, incidentSevere:0, count:0
-    }
-    s.workerHours += (r.work_time_min||0)/60
-    s.machineHours += (r.machine_time_min||0)/60
-    s.count += 1
-    if (r.ky_check) s.kyRate += 1
-    if (r.incident==='軽微') s.incidentLight += 1
-    if (r.incident==='事故') s.incidentSevere += 1
-    const u = (r.output_unit||'').trim()
-    if(u) s.outByUnit.set(u, (s.outByUnit.get(u)||0) + (r.output_value||0))
-    bySiteMap.set(key, s)
-    const ds = daySetBySite.get(key) || new Set<string>()
-    if (r.work_date) ds.add(r.work_date)
-    daySetBySite.set(key, ds)
-  }
-  const bySite = [...bySiteMap.values()].map(s=>{
-    const units2 = [...s.outByUnit.keys()]
-    const outLabel = units2.length===0 ? '-' :
-      (units2.length===1 ? `${fmtNum(s.outByUnit.get(units2[0])||0,1)} ${units2[0]}`
-                         : units2.map(u=>`${fmtNum(s.outByUnit.get(u)||0,1)} ${u}`).join(' / '))
-    const prod = (singleUnit && s.workerHours>0) ? ( (s.outByUnit.get(singleUnit)||0) / s.workerHours ) : NaN
-    return {
-      key: s.key,
-      days: (daySetBySite.get(s.key)?.size)||0,
-      workerHours: s.workerHours,
-      machineHours: s.machineHours,
-      outputLabel: outLabel,
-      productivityLabel: (singleUnit && isFinite(prod)) ? `${prod.toFixed(2)} ${singleUnit}/人時` : '-',
-      kyRate: s.count>0 ? s.kyRate/s.count : 0,
-      incidentLight: s.incidentLight,
-      incidentSevere: s.incidentSevere
-    }
-  })
-
-  const bySiteSeries = bySite.map(s=>{
-    const m = s.productivityLabel.match(/^([\d.]+)/)
-    const v = m ? Number(m[1]) : 0
-    return {label: s.key, value: v}
-  })
-
-  const workerSet = new Set(rows.map(r=>r.worker_id || r.worker_name).filter(Boolean))
-  const teamSet = new Set(rows.map(r=>r.team).filter(Boolean))
-  const siteSet = new Set(rows.map(r=>r.site_id).filter(Boolean))
-
-  return {
-    count, workerHours, machineHours, kyCount, kyRate,
-    incidentLight, incidentSevere,
-    totalOutputLabel,
-    productivityLabel,
-    singleUnit,
-    dailySeries,
-    bySite,
-    bySiteSeries,
-    workerCount: workerSet.size,
-    teamCount: teamSet.size,
-    siteCount: siteSet.size,
-  }
-}
-function fmtNum(n:number, d=0){ return isFinite(n) ? n.toFixed(d) : '-' }

@@ -1,6 +1,5 @@
 import React, { useState } from 'react'
 
-// ---- 作業種別と既定単位
 const TASK_OPTIONS = [
   { v: '下刈り', unit: 'ha' },
   { v: '間伐', unit: '本' },
@@ -15,7 +14,6 @@ const TASK_OPTIONS = [
 const WEATHER = ['晴','曇','雨','雪','その他']
 const INCIDENT = ['無','軽微','事故']
 
-// CSVヘッダー
 const header = [
   'work_date','worker_id','worker_name','team','site_id','stand_id',
   'task_code','work_time_min','output_value','output_unit',
@@ -31,8 +29,7 @@ function csvEscape(val: unknown){
 function toCSV(rows: any[]){
   const head = header.map(csvEscape).join(',')
   const body = rows.map(r => header.map(k => csvEscape((r as any)[k])).join(',')).join('\n')
-  // BOM付与でExcel日本語文字化け回避
-  return '\ufeff' + head + '\n' + body
+  return '\ufeff' + head + '\n' + body // Excel向けにBOM付与
 }
 
 export default function App(){
@@ -71,6 +68,7 @@ export default function App(){
     }
     setRows(prev => [...prev, {...form}])
   }
+
   function clearForm(){
     setForm(p => ({...p,
       site_id:'', stand_id:'', output_value:0, work_time_min:0,
@@ -78,6 +76,7 @@ export default function App(){
       photo_1:'', photo_2:'', photo_3:''
     }))
   }
+
   function downloadCSV(){
     const blob = new Blob([toCSV(rows)], {type:'text/csv;charset=utf-8;'})
     const url = URL.createObjectURL(blob)
@@ -86,6 +85,7 @@ export default function App(){
     a.download = `worklog_${new Date().toISOString().slice(0,10)}.csv`
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url)
   }
+
   const timePresets = [120, 240, 360, 480]
 
   return (
@@ -93,7 +93,7 @@ export default function App(){
       <div className="max-w-5xl mx-auto space-y-6">
         <h1 className="text-2xl md:text-3xl font-bold">作業日報 入力フォーム</h1>
         <p className="text-gray-600">
-          スマホ/PCで使える簡易フォーム。追加→「CSVダウンロード」で出力し、Excel雛形の「日報_raw」に貼り付けます。
+          追加→「CSVダウンロード」で出力し、Excel雛形の「日報_raw」に貼り付けます。
         </p>
 
         <div className="bg-white rounded-2xl shadow p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-4">

@@ -21,8 +21,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-      - run: npm ci || npm i
+      - run: npm i --no-fund --no-audit 
       - run: npm run build
       # SPA のリロード 404 回避
       - run: cp dist/index.html dist/404.html

@@ -21,10 +21,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm i --no-fund --no-audit 
+
+      # 429対策：npmのリトライ設定を強める
+      - run: |
+          npm config set fetch-retries 5
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+
+      # 429対策：インストールを3回まで指数バックオフでリトライ
+      - name: Install deps with retry
+        run: |
+          for i in 1 2 3; do
+            npm i --no-fund --no-audit && break || sleep $((i*20));
+          done
+
       - run: npm run build
-      # SPA のリロード 404 回避
-      - run: cp dist/index.html dist/404.html
+      - run: cp dist/index.html dist/404.html   # SPAのリロード404回避
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

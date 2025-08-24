@@ -1,15 +1,12 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
+import { auth, db, googleProvider } from './firebase'
+import { signInWithPopup, onAuthStateChanged, signOut, User } from 'firebase/auth'
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore'
 
 const TASK_OPTIONS = [
-  { v: '下刈り', unit: 'ha' },
-  { v: '間伐', unit: '本' },
-  { v: '主伐', unit: 'm³' },
-  { v: '造林', unit: '本' },
-  { v: '路網整備', unit: 'm' },
-  { v: '集材', unit: 'm³' },
-  { v: '造材', unit: 'm³' },
-  { v: '搬出', unit: 'm³' },
-  { v: '調査', unit: 'ha' },
+  { v: '下刈り', unit: 'ha' }, { v: '間伐', unit: '本' }, { v: '主伐', unit: 'm³' },
+  { v: '造林', unit: '本' }, { v: '路網整備', unit: 'm' }, { v: '集材', unit: 'm³' },
+  { v: '造材', unit: 'm³' }, { v: '搬出', unit: 'm³' }, { v: '調査', unit: 'ha' },
 ]
 const WEATHER = ['晴','曇','雨','雪','その他']
 const INCIDENT = ['無','軽微','事故']
@@ -33,27 +30,16 @@ function toCSV(rows: any[]){
 }
 
 export default function App(){
+  const [user, setUser] = useState<User|null>(null)
+  useEffect(() => onAuthStateChanged(auth, setUser), [])
+
   const [rows, setRows] = useState<any[]>([])
   const [form, setForm] = useState<any>({
     work_date: new Date().toISOString().slice(0,10),
-    worker_id: '',
-    worker_name: '',
-    team: '',
-    site_id: '',
-    stand_id: '',
-    task_code: '間伐',
-    work_time_min: 0,
-    output_value: 0,
-    output_unit: '本',
-    machine_id: '',
-    machine_time_min: 0,
-    weather: '晴',
-    ky_check: false,
-    incident: '無',
-    photo_1: '',
-    photo_2: '',
-    photo_3: '',
-    note: '',
+    worker_id:'', worker_name:'', team:'', site_id:'', stand_id:'',
+    task_code:'間伐', work_time_min:0, output_value:0, output_unit:'本',
+    machine_id:'', machine_time_min:0, weather:'晴', ky_check:false,
+    incident:'無', photo_1:'', photo_2:'', photo_3:'', note:'',
   })
 
   function onTaskChange(task: string){
@@ -61,12 +47,26 @@ export default function App(){
     setForm(p => ({...p, task_code: task, output_unit: t ? t.unit : p.output_unit}))
   }
 
-  function addRow(){
+  // ← Firestore 保存は addRow の中で（async）
+  async function addRow(){
     if(!form.work_date || !form.worker_name || !form.task_code){
-      alert('作業日・作業員名・作業種別は必須です')
-      return
+      alert('作業日・作業員名・作業種別は必須です'); return
     }
-    setRows(prev => [...prev, {...form}])
+    const newRow = { ...form }
+    setRows(prev => [...prev, newRow])
+
+    // ログイン済なら Firestore にも保存（圏外でもOK＝復帰時に同期）
+    if (user) {
+      try {
+        await addDoc(collection(db, 'reports'), {
+          ...newRow,
+          uid: user.uid,
+          created_at: serverTimestamp(),
+        })
+      } catch (e) {
+        console.warn('Firestore 保存に失敗しました（後で自動同期される場合があります）', e)
+      }
+    }
   }
 
   function clearForm(){
@@ -91,11 +91,27 @@ export default function App(){
   return (
     <div className="min-h-screen bg-gray-50 p-4 md:p-8">
       <div className="max-w-5xl mx-auto space-y-6">
-        <h1 className="text-2xl md:text-3xl font-bold">作業日報 入力フォーム</h1>
+
+        {/* ヘッダ：ログインUI */}
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl md:text-3xl font-bold">作業日報 入力フォーム</h1>
+          <div className="flex items-center gap-3">
+            {user ? (
+              <>
+                <span className="text-sm text-gray-600">{user.displayName || user.email}</span>
+                <button className="px-3 py-1 border rounded-md" onClick={()=>signOut(auth)}>ログアウト</button>
+              </>
+            ) : (
+              <button className="px-3 py-1 border rounded-md" onClick={()=>signInWithPopup(auth, googleProvider)}>Googleでログイン</button>
+            )}
+          </div>
+        </div>
+
         <p className="text-gray-600">
-          追加→「CSVダウンロード」で出力し、Excel雛形の「日報_raw」に貼り付けます。
+          追加→「CSVダウンロード」で出力。ログイン時は Firestore にも自動保存（圏外OK）。
         </p>
 
+        {/* 入力フォーム */}
         <div className="bg-white rounded-2xl shadow p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
           <label className="flex flex-col gap-1">
             <span className="text-sm text-gray-500">作業日</span>
@@ -220,7 +236,7 @@ export default function App(){
           </label>
 
           <div className="flex flex-wrap gap-2 md:col-span-2">
-            <button className="px-4 py-2 rounded-xl bg-black text-white" onClick={addRow}>追加</button>
+            <button className="px-4 py-2 rounded-xl bg-black text-white" onClick={addRow}>追加（保存）</button>
             <button className="px-4 py-2 rounded-xl border" onClick={clearForm}>クリア</button>
             <button className="px-4 py-2 rounded-xl border" onClick={downloadCSV} disabled={rows.length===0}>
               CSVダウンロード（{rows.length}件）
@@ -228,6 +244,7 @@ export default function App(){
           </div>
         </div>
 
+        {/* プレビュー */}
         <div className="bg-white rounded-2xl shadow p-4 md:p-6">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-lg font-semibold">入力済みデータ（プレビュー）</h2>
@@ -253,6 +270,7 @@ export default function App(){
             </table>
           </div>
         </div>
+
       </div>
     </div>
   )

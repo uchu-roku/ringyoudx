@@ -306,11 +306,15 @@ export default function App(){
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-sm text-gray-500">機械稼働（分）</span>
-            <input type="number" className="border rounded-md p-2" min={0} step={10}
+            <input
+              type="number"
+              className="border rounded-md p-2"
+              min={0}
+              step={10}
               value={form.machine_time_min}
-              onChange={e=>setForm({...form, machine_time_min:Number(e.target.value})}/>
+              onChange={e => setForm({ ...form, machine_time_min: Number(e.target.value) })}
+            />
           </label>
-
           <label className="flex flex-col gap-1">
             <span className="text-sm text-gray-500">天候</span>
             <select className="border rounded-md p-2" value={form.weather}

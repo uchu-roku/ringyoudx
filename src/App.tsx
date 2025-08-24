@@ -32,6 +32,34 @@ function toCSV(rows: any[]){
   return '\ufeff' + head + '\n' + body
 }
 
+// かんたんCSVパーサ（RFC4180相当：ダブルクォート/改行対応）
+function parseCSV(text: string): string[][] {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1) // BOM除去
+  const rows: string[][] = [[]]
+  let field = ''
+  let inQuotes = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++ } // 連続"" → エスケープ
+        else { inQuotes = false }
+      } else {
+        field += c
+      }
+    } else {
+      if (c === '"') inQuotes = true
+      else if (c === ',') { rows[rows.length - 1].push(field); field = '' }
+      else if (c === '\n') { rows[rows.length - 1].push(field); field = ''; rows.push([]) }
+      else if (c === '\r') { /* ignore */ }
+      else { field += c }
+    }
+  }
+  rows[rows.length - 1].push(field)
+  // 末尾の空行を削除
+  return rows.filter(r => !(r.length === 1 && r[0] === ''))
+}
+
 export default function App(){
   const [user, setUser] = useState<User|null>(null)
   useEffect(() => onAuthStateChanged(auth, setUser), [])
@@ -50,7 +78,7 @@ export default function App(){
     setForm(p => ({...p, task_code: task, output_unit: t ? t.unit : p.output_unit}))
   }
 
-  // 追加（ローカル配列 + Firestore保存）
+  // 1件追加（ローカル配列 + Firestore保存）
   async function addRow(){
     if(!form.work_date || !form.worker_name || !form.task_code){
       alert('作業日・作業員名・作業種別は必須です'); return
@@ -64,7 +92,7 @@ export default function App(){
           ...newRow, uid: user.uid, created_at: serverTimestamp(),
         })
       } catch (e) {
-        console.warn('Firestore 保存に失敗（後で自動同期される可能性あり）', e)
+        console.warn('Firestore 保存に失敗（後で自動同期の可能性あり）', e)
       }
     }
   }
@@ -87,7 +115,7 @@ export default function App(){
 
   const timePresets = [120, 240, 360, 480]
 
-  // ▼ ここが「最新50件の購読」
+  // ▼ Firestoreの最新50件を購読
   const [cloudRows, setCloudRows] = useState<any[]>([])
   useEffect(() => {
     if (!user) { setCloudRows([]); return }
@@ -96,6 +124,64 @@ export default function App(){
       setCloudRows(snap.docs.map(d => d.data()))
     })
   }, [user])
+
+  // ▼ CSV取込（ダミーデータ）
+  const [saveToCloud, setSaveToCloud] = useState(true)
+  const [importStatus, setImportStatus] = useState<'idle'|'parsing'|'saving'|'done'|'error'>('idle')
+  const [importMsg, setImportMsg] = useState('')
+
+  async function handleCSVFile(file: File | undefined){
+    if (!file) return
+    setImportStatus('parsing'); setImportMsg('解析中...')
+    const text = await file.text()
+    const matrix = parseCSV(text)
+    if (matrix.length === 0) { setImportStatus('error'); setImportMsg('CSVが空です'); return }
+
+    // ヘッダー確認（一致前提）。一致しない場合はエラーにする。
+    const hasHeader = matrix[0].map(s=>s.trim()).join(',') === header.join(',')
+    if (!hasHeader) {
+      setImportStatus('error')
+      setImportMsg('ヘッダーが想定と異なります。アプリの「CSVダウンロード」で出力した形式をお使いください。')
+      return
+    }
+
+    const records = matrix.slice(1).filter(r => r.length>0 && r.some(x=>x?.trim()))
+      .map(cols => {
+        const obj:any = {}
+        header.forEach((k, i)=> obj[k] = cols[i] ?? '')
+        // 型を軽く整える
+        obj.work_time_min = Number(obj.work_time_min || 0)
+        obj.machine_time_min = Number(obj.machine_time_min || 0)
+        obj.output_value = Number(obj.output_value || 0)
+        obj.ky_check = String(obj.ky_check) === 'true' || String(obj.ky_check) === '1'
+        return obj
+      })
+
+    // 画面にも反映
+    setRows(prev => [...prev, ...records])
+
+    // Firestoreにも（オプション）
+    if (user && saveToCloud && records.length>0) {
+      setImportStatus('saving'); setImportMsg(`Firestoreへ保存中... 0 / ${records.length}`)
+      let ok = 0, ng = 0
+      for (let i=0; i<records.length; i++){
+        try {
+          await addDoc(collection(db, 'reports'), {
+            ...records[i], uid: user.uid, created_at: serverTimestamp(),
+          })
+          ok++
+        } catch {
+          ng++
+        }
+        if ((i+1) % 10 === 0 || i === records.length-1) {
+          setImportMsg(`Firestoreへ保存中... ${i+1} / ${records.length}（成功:${ok}, 失敗:${ng}）`)
+        }
+      }
+      setImportStatus('done'); setImportMsg(`完了：成功 ${ok} 件 / 失敗 ${ng} 件`)
+    } else {
+      setImportStatus('done'); setImportMsg(`取込完了：${records.length} 件（ローカルのみ）`)
+    }
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 p-4 md:p-8">
@@ -117,12 +203,31 @@ export default function App(){
         </div>
 
         <p className="text-gray-600">
-          追加→「CSVダウンロード」で出力。ログイン時は Firestore にも自動保存（圏外OK）。
+          追加→「CSVダウンロード」で出力。<b>CSV取込</b>からダミーデータの一括登録も可能。ログイン時は Firestore にも保存（圏外OK）。
         </p>
+
+        {/* ▼ CSV 取込（ダミーデータ） */}
+        <div className="bg-white rounded-2xl shadow p-4 md:p-6">
+          <h2 className="text-lg font-semibold mb-3">CSV取込（ダミーデータ）</h2>
+          <div className="flex flex-wrap items-center gap-3">
+            <input type="file" accept=".csv,text/csv"
+              onChange={e=>handleCSVFile(e.target.files?.[0] as File)} />
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={saveToCloud}
+                onChange={e=>setSaveToCloud(e.target.checked)} disabled={!user}/>
+              <span>Firestoreにも保存（ログイン中のみ）</span>
+            </label>
+            <span className="text-sm text-gray-500">
+              期待ヘッダー：{header.join(', ')}
+            </span>
+          </div>
+          {importStatus !== 'idle' && (
+            <p className="mt-2 text-sm text-gray-700">{importMsg}</p>
+          )}
+        </div>
 
         {/* 入力フォーム */}
         <div className="bg-white rounded-2xl shadow p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* 以降は既存と同じ */}
           <label className="flex flex-col gap-1">
             <span className="text-sm text-gray-500">作業日</span>
             <input type="date" className="border rounded-md p-2"
@@ -203,7 +308,7 @@ export default function App(){
             <span className="text-sm text-gray-500">機械稼働（分）</span>
             <input type="number" className="border rounded-md p-2" min={0} step={10}
               value={form.machine_time_min}
-              onChange={e=>setForm({...form, machine_time_min:Number(e.target.value)})}/>
+              onChange={e=>setForm({...form, machine_time_min:Number(e.target.value})}/>
           </label>
 
           <label className="flex flex-col gap-1">

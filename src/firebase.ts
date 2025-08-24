@@ -4,7 +4,12 @@ import { getAuth, GoogleAuthProvider } from 'firebase/auth'
 import { getFirestore, enableIndexedDbPersistence } from 'firebase/firestore'
 
 const firebaseConfig = {
-  // ← Firebaseコンソールの config をコピペ
+  apiKey: "AIzaSyBFCXGOsvnc4-TN88J5ioV8H3MC0kvMiXg",
+  authDomain: "ringyoudx.firebaseapp.com",
+  projectId: "ringyoudx",
+  storageBucket: "ringyoudx.firebasestorage.app",
+  messagingSenderId: "529402072238",
+  appId: "1:529402072238:web:c47cb5e83dd39175a5b13f"
 }
 
 export const app = initializeApp(firebaseConfig)

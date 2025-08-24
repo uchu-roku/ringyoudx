@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react'
 import { auth, db, googleProvider } from './firebase'
 import { signInWithPopup, onAuthStateChanged, signOut, User } from 'firebase/auth'
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore'
+import {
+  collection, addDoc, serverTimestamp,
+  query, orderBy, limit, onSnapshot
+} from 'firebase/firestore'
 
 const TASK_OPTIONS = [
   { v: '下刈り', unit: 'ha' }, { v: '間伐', unit: '本' }, { v: '主伐', unit: 'm³' },
@@ -26,7 +29,7 @@ function csvEscape(val: unknown){
 function toCSV(rows: any[]){
   const head = header.map(csvEscape).join(',')
   const body = rows.map(r => header.map(k => csvEscape((r as any)[k])).join(',')).join('\n')
-  return '\ufeff' + head + '\n' + body // Excel向けにBOM付与
+  return '\ufeff' + head + '\n' + body
 }
 
 export default function App(){
@@ -47,7 +50,7 @@ export default function App(){
     setForm(p => ({...p, task_code: task, output_unit: t ? t.unit : p.output_unit}))
   }
 
-  // ← Firestore 保存は addRow の中で（async）
+  // 追加（ローカル配列 + Firestore保存）
   async function addRow(){
     if(!form.work_date || !form.worker_name || !form.task_code){
       alert('作業日・作業員名・作業種別は必須です'); return
@@ -55,16 +58,13 @@ export default function App(){
     const newRow = { ...form }
     setRows(prev => [...prev, newRow])
 
-    // ログイン済なら Firestore にも保存（圏外でもOK＝復帰時に同期）
     if (user) {
       try {
         await addDoc(collection(db, 'reports'), {
-          ...newRow,
-          uid: user.uid,
-          created_at: serverTimestamp(),
+          ...newRow, uid: user.uid, created_at: serverTimestamp(),
         })
       } catch (e) {
-        console.warn('Firestore 保存に失敗しました（後で自動同期される場合があります）', e)
+        console.warn('Firestore 保存に失敗（後で自動同期される可能性あり）', e)
       }
     }
   }
@@ -81,12 +81,21 @@ export default function App(){
     const blob = new Blob([toCSV(rows)], {type:'text/csv;charset=utf-8;'})
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
-    a.href = url
-    a.download = `worklog_${new Date().toISOString().slice(0,10)}.csv`
+    a.href = url; a.download = `worklog_${new Date().toISOString().slice(0,10)}.csv`
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url)
   }
 
   const timePresets = [120, 240, 360, 480]
+
+  // ▼ ここが「最新50件の購読」
+  const [cloudRows, setCloudRows] = useState<any[]>([])
+  useEffect(() => {
+    if (!user) { setCloudRows([]); return }
+    const q = query(collection(db, 'reports'), orderBy('created_at','desc'), limit(50))
+    return onSnapshot(q, snap => {
+      setCloudRows(snap.docs.map(d => d.data()))
+    })
+  }, [user])
 
   return (
     <div className="min-h-screen bg-gray-50 p-4 md:p-8">
@@ -113,6 +122,7 @@ export default function App(){
 
         {/* 入力フォーム */}
         <div className="bg-white rounded-2xl shadow p-4 md:p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* 以降は既存と同じ */}
           <label className="flex flex-col gap-1">
             <span className="text-sm text-gray-500">作業日</span>
             <input type="date" className="border rounded-md p-2"
@@ -244,7 +254,7 @@ export default function App(){
           </div>
         </div>
 
-        {/* プレビュー */}
+        {/* ローカル入力のプレビュー */}
         <div className="bg-white rounded-2xl shadow p-4 md:p-6">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-lg font-semibold">入力済みデータ（プレビュー）</h2>
@@ -270,6 +280,27 @@ export default function App(){
             </table>
           </div>
         </div>
+
+        {/* クラウド保存（最新50件） */}
+        {user && (
+          <div className="bg-white rounded-2xl shadow p-4 md:p-6">
+            <h2 className="text-lg font-semibold mb-3">クラウド保存（最新50件）</h2>
+            <div className="overflow-auto">
+              <table className="min-w-full text-sm">
+                <thead><tr className="bg-gray-100">
+                  {header.map(h=><th key={h} className="text-left p-2 whitespace-nowrap">{h}</th>)}
+                </tr></thead>
+                <tbody>
+                  {cloudRows.map((r,i)=>(
+                    <tr key={i} className="border-t">
+                      {header.map(h=><td key={h} className="p-2 whitespace-nowrap">{String((r as any)[h] ?? '')}</td>)}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
 
       </div>
     </div>
